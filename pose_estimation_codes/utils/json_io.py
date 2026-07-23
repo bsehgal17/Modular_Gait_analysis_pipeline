@@ -1,0 +1,158 @@
+import pickle
+import numpy as np
+import os
+import json
+from pose_estimation.pose_estimation_dataclasses.pose_estimation_dataclass import (
+    PoseEstimationResult,
+)
+
+
+def save_pose_est_data_to_json(
+    pose_est_data: PoseEstimationResult, save_dir: str, video_name: str
+):
+    """Save PoseEstimationResult to JSON file."""
+    output_json_path = os.path.join(save_dir, f"{video_name}.json")
+
+    # Convert to dictionary and save
+    output_dict = pose_est_data.to_dict()
+
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        json.dump(output_dict, f, indent=2)
+
+
+def load_pose_est_data_from_json(json_path: str) -> PoseEstimationResult:
+    """Load PoseEstimationResult from JSON file."""
+    with open(json_path, "r", encoding="utf-8") as f:
+        data_dict = json.load(f)
+
+    return PoseEstimationResult.from_dict(data_dict)
+
+
+def combine_keypoints(pose_results, frame_idx, pose_est_data, detection_data):
+    """Legacy function - kept for backward compatibility but should not be used with new structure."""
+    # This function is deprecated when using PoseEstimationResult with person tracking
+    # The new structure handles data storage through the FrameProcessor.finalize_video_processing
+    pass
+
+
+def save_keypoints_to_json(
+    pose_est_data, save_dir, video_name, detector_config: dict = None
+):
+    """Legacy function - updated to work with new PoseEstimationResult structure."""
+    if isinstance(pose_est_data, PoseEstimationResult):
+        # New structure
+        if detector_config:
+            pose_est_data.detection_config = detector_config
+        save_pose_est_data_to_json(pose_est_data, save_dir, video_name)
+    else:
+        # Legacy structure - convert to new format first
+        legacy_pose_est_data = PoseEstimationResult(
+            video_name=video_name, detection_config=detector_config
+        )
+
+        # Convert legacy format to new format (basic conversion)
+        for frame_data in pose_est_data:
+            frame_idx = frame_data["frame_idx"]
+
+            # Extract detection data if available
+            if "detection_data" in frame_data:
+                det_data = frame_data["detection_data"]
+                legacy_pose_est_data.add_frame_detections(
+                    frame_idx,
+                    det_data["all_bboxes"],
+                    det_data["all_scores"],
+                    det_data["all_labels"],
+                )
+
+            # Convert keypoints to person data (simple assignment without tracking)
+            for i, person_data in enumerate(frame_data.get("keypoints", [])):
+                person_id = i  # Simple assignment - not optimal but functional
+                person = legacy_pose_est_data.get_or_create_person(person_id)
+
+                if "keypoints" in person_data:
+                    keypoints = person_data["keypoints"]
+                    keypoints_visible = person_data.get("keypoints_visible", [])
+                    bboxes = person_data.get("bboxes", [])
+                    bbox_scores = person_data.get("bbox_scores", [])
+                    legacy_bbox = person_data.get("bbox", [])
+
+                    if legacy_bbox:
+                        person.add_detection(frame_idx, legacy_bbox, 1.0, label=0)
+                        person.add_pose(
+                            frame_idx, keypoints, keypoints_visible, bboxes, bbox_scores
+                        )
+
+        save_pose_est_data_to_json(legacy_pose_est_data, save_dir, video_name)
+
+
+def unpack_prediction_pkl(pkl_path, person_idx=0):
+    """
+    Unpacks prediction data. Updated to work with new PoseEstimationResult structure.
+
+    Args:
+        pkl_path (str): Path to the saved .pkl or .json file.
+        person_idx (int): Index of the person per video (default: 0).
+
+    Returns:
+        np.ndarray: Array of shape (N, J, 2) for keypoints
+    """
+    if pkl_path.endswith(".json"):
+        # New format
+        pose_est_data = load_pose_est_data_from_json(pkl_path)
+
+        if person_idx >= len(pose_est_data.persons):
+            raise ValueError(f"Video has fewer than {person_idx + 1} persons.")
+
+        person = pose_est_data.persons[person_idx]
+        poses = sorted(person.poses, key=lambda x: x.frame_idx)
+
+        keypoints_list = []
+        for pose in poses:
+            # keypoints are already (J, 2) format
+            kpts = np.array(pose.keypoints)
+            keypoints_list.append(kpts)
+
+        return np.stack(keypoints_list, axis=0) if keypoints_list else np.array([])
+
+    else:
+        # PKL format - handle both new PoseEstimationResultBundle and legacy dictionary formats
+        with open(pkl_path, "rb") as f:
+            data = pickle.load(f)
+
+        # Handle PoseEstimationResultBundle objects
+        if hasattr(data, "to_dict"):
+            # It's a PoseEstimationResultBundle object, convert to dictionary
+            data = data.to_dict()
+        elif hasattr(data, "pose_est_data"):
+            # It's a PoseEstimationResultBundle object without to_dict method (older version)
+            data = data.pose_est_data.to_dict()
+
+        # Check if it's new format (with persons) or legacy format
+        if "persons" in data:
+            # New format - similar to JSON handling but from PKL
+            if person_idx >= len(data["persons"]):
+                raise ValueError(f"Video has fewer than {person_idx + 1} persons.")
+
+            person = data["persons"][person_idx]
+            poses = sorted(person["poses"], key=lambda x: x["frame_idx"])
+
+            keypoints_list = []
+            for pose in poses:
+                kpts = np.array(pose["keypoints"])
+                keypoints_list.append(kpts)
+
+            return np.stack(keypoints_list, axis=0) if keypoints_list else np.array([])
+        else:
+            # Legacy format
+            keypoints_list = []
+            for frame_data in data["keypoints"]:
+                people = frame_data["keypoints"]
+                if len(people) <= person_idx:
+                    raise ValueError(
+                        f"Frame {frame_data['frame_idx']} has fewer than {person_idx + 1} people."
+                    )
+
+                kpts = np.array(people[person_idx]["keypoints"])  # (J, 2)
+                keypoints_list.append(kpts)
+
+            return np.stack(keypoints_list, axis=0)  # (N, J, 2)

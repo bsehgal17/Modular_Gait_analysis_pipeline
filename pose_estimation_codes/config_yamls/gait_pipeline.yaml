@@ -1,0 +1,9 @@
+orchestrator:
+  log_dir: "./logs"
+  default_device: "cuda:0"
+
+pipelines:
+  - name: detect_RTMW_UVic
+    steps:
+      - command: detect
+        config_file: "config_yamls/detector/detect_rtmw.yaml"

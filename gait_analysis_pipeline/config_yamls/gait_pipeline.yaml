@@ -1,0 +1,5 @@
+fps: 59.91706750704926
+
+joint_enum:
+  module: "pose_estimation.enums.joint_enum"
+  class: "PredJointsCOCOWholebody"
